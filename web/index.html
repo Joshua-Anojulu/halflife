@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Halflife: forgetting the chain rule costs you implicit differentiation</title>
+<style>
+:root{--ink:#17191d;--muted:#5f6571;--line:#e3e5e9;--paper:#fff;--bg:#f7f8fa}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font:15px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:var(--ink);background:var(--bg)}
+.wrap{max-width:1120px;margin:0 auto;padding:0 20px 56px}
+header{background:var(--paper);border-bottom:1px solid var(--line);padding:18px 0}
+h1{font-size:22px;font-weight:650;letter-spacing:-.3px}
+h1 span{display:block;font-size:14.5px;color:var(--muted);font-weight:400;letter-spacing:0}
+.panel{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:15px 18px;margin-top:16px}
+label{font-size:13px;font-weight:600}
+.controls{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+.controls>div{display:flex;gap:9px;align-items:center}
+input[type=range]{width:190px}
+select,button{font:inherit;border:1px solid #ccd1d9;border-radius:7px;background:#fff;padding:7px 10px}
+button{font-weight:550;cursor:pointer}
+button:hover{background:#f2f4f7}
+button.go{background:var(--ink);color:#fff;border-color:var(--ink)}
+:focus-visible{outline:2px solid #1d4ed8;outline-offset:1px}
+.val{font-variant-numeric:tabular-nums;font-weight:600;min-width:34px;display:inline-block}
+svg{width:100%;height:auto;display:block;background:var(--paper);border:1px solid var(--line);border-radius:10px;margin-top:16px}
+.node rect{stroke-width:1.2px}
+.node text{font-size:7.6px;fill:#15202b;pointer-events:none}
+.node.selected rect{stroke:#111;stroke-width:2.4px}
+.edge{stroke:#c3c9d2;stroke-width:1px;fill:none}
+.edge.lit{stroke:#b45309;stroke-width:1.8px}
+.legend{display:flex;gap:16px;align-items:center;font-size:12.5px;color:var(--muted);margin-top:12px;flex-wrap:wrap}
+.swatch{width:13px;height:13px;border-radius:3px;display:inline-block;vertical-align:-2px;margin-right:5px;border:1px solid rgba(0,0,0,.12)}
+.readout{font-size:13.5px;margin-top:12px;color:#344054}
+.readout b{font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}
+th,td{text-align:left;padding:6px 9px;border-bottom:1px solid var(--line)}
+th{font-size:11px;letter-spacing:.4px;text-transform:uppercase;color:var(--muted)}
+td.num{font-variant-numeric:tabular-nums;text-align:right}
+footer{font-size:12.5px;color:var(--muted);margin-top:24px;line-height:1.75}
+</style>
+</head>
+<body>
+<header><div class="wrap"><h1>Halflife<span>Forgetting the chain rule costs you implicit differentiation</span></h1></div></header>
+<main class="wrap">
+  <section class="panel">
+    <div class="controls">
+      <div>
+        <label for="days">Days since the selected concept was practised</label>
+        <input type="range" id="days" min="0" max="42" value="0" step="1" />
+        <span class="val" id="days-out">0</span>
+      </div>
+      <div>
+        <label for="gamma">Coupling strength &gamma;</label>
+        <input type="range" id="gamma" min="0" max="1.5" value="0.8" step="0.1" />
+        <span class="val" id="gamma-out">0.8</span>
+      </div>
+      <div>
+        <label for="pick">Concept</label>
+        <select id="pick"></select>
+      </div>
+      <button id="chain" class="go" type="button">Neglect the chain rule for 3 weeks</button>
+    </div>
+    <p class="readout" id="readout"></p>
+    <div class="legend">
+      <span><span class="swatch" style="background:#15803d"></span>recall above 0.8</span>
+      <span><span class="swatch" style="background:#eab308"></span>0.5 to 0.8</span>
+      <span><span class="swatch" style="background:#dc2626"></span>below 0.5, due for review</span>
+      <span><span class="swatch" style="background:#fff;border-color:#111"></span>the concept you selected</span>
+      <span>Arrows run from a prerequisite to what depends on it.</span>
+    </div>
+  </section>
+
+  <svg id="dag" role="img" aria-labelledby="dag-title"><title id="dag-title">Prerequisite graph coloured by predicted recall</title></svg>
+
+  <section class="panel">
+    <h2 style="font-size:15px;font-weight:600">Concepts that fell without being touched</h2>
+    <p class="readout" id="fallen">Nothing has decayed yet.</p>
+    <table id="table"><thead><tr><th>Concept</th><th class="num">Own recall</th><th class="num">With prerequisites</th><th class="num">Drop</th></tr></thead><tbody></tbody></table>
+  </section>
+
+  <footer>
+    Recall is 2<sup>-&Delta;/h</sup>. A concept's effective half-life is its own half-life multiplied by
+    the recall of each prerequisite raised to &gamma;, so &gamma; = 0 makes every concept independent,
+    which is what every spaced repetition system assumes. Half-lives here are illustrative, not fitted:
+    the fitted numbers are in the study, and the README explains what they do and do not support.
+  </footer>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+let concepts = [], prereqs = {}, names = {}, order = [], halfLives = {}, lastSeen = {}, selected = null;
+
+const recall = (delta, h) => Math.pow(2, -delta / Math.max(h, 0.01));
+
+function effective(id, gamma) {
+  let base = halfLives[id];
+  if (gamma > 0) {
+    let coupling = 1;
+    for (const parent of prereqs[id] || []) coupling *= ownRecall(parent);
+    base *= Math.pow(Math.max(coupling, 1e-4), gamma);
+  }
+  return base;
+}
+const ownRecall = id => recall(lastSeen[id] || 0, halfLives[id]);
+const fullRecall = (id, gamma) => recall(lastSeen[id] || 0, effective(id, gamma));
+const colour = p => p >= 0.8 ? '#15803d' : p >= 0.5 ? '#eab308' : '#dc2626';
+const tint = p => p >= 0.8 ? '#dcfce7' : p >= 0.5 ? '#fef9c3' : '#fee2e2';
+
+function layout() {
+  const depth = {};
+  for (const id of order) depth[id] = Math.max(0, ...(prereqs[id] || []).map(p => depth[p] + 1));
+  const rows = {};
+  for (const id of order) (rows[depth[id]] ||= []).push(id);
+  const positions = {};
+  const width = 1120, rowHeight = 62;
+  Object.entries(rows).forEach(([level, ids]) => {
+    const step = width / (ids.length + 1);
+    ids.forEach((id, i) => { positions[id] = { x: step * (i + 1), y: 34 + Number(level) * rowHeight }; });
+  });
+  return { positions, height: 34 + (Object.keys(rows).length) * rowHeight + 20 };
+}
+
+function draw() {
+  const gamma = Number($('#gamma').value);
+  const { positions, height } = layout();
+  const svg = $('#dag');
+  svg.setAttribute('viewBox', `0 0 1120 ${height}`);
+  const edges = [], nodes = [];
+  for (const id of order) {
+    for (const parent of prereqs[id] || []) {
+      const a = positions[parent], b = positions[id];
+      const lit = gamma > 0 && ownRecall(parent) < 0.8 && fullRecall(id, gamma) < 0.8;
+      edges.push(`<path class="edge ${lit ? 'lit' : ''}" d="M${a.x} ${a.y + 11} C ${a.x} ${a.y + 34}, ${b.x} ${b.y - 34}, ${b.x} ${b.y - 11}"/>`);
+    }
+  }
+  for (const id of order) {
+    const { x, y } = positions[id];
+    const p = fullRecall(id, gamma);
+    const label = names[id].length > 24 ? names[id].slice(0, 23) + '…' : names[id];
+    nodes.push(`<g class="node ${id === selected ? 'selected' : ''}" data-id="${id}" tabindex="0" role="button" aria-label="${names[id]}, recall ${p.toFixed(2)}">
+      <rect x="${x - 54}" y="${y - 11}" width="108" height="22" rx="5" fill="${tint(p)}" stroke="${colour(p)}"/>
+      <text x="${x}" y="${y + 3}" text-anchor="middle">${label}</text></g>`);
+  }
+  svg.innerHTML = `<title id="dag-title">Prerequisite graph coloured by predicted recall</title>` + edges.join('') + nodes.join('');
+  svg.querySelectorAll('.node').forEach(n => {
+    n.onclick = () => { selected = n.dataset.id; $('#pick').value = selected; sync(); };
+    n.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); n.onclick(); } };
+  });
+  report(gamma);
+}
+
+function report(gamma) {
+  const fallen = order
+    .map(id => ({ id, own: ownRecall(id), full: fullRecall(id, gamma) }))
+    .filter(row => row.own - row.full > 0.05)
+    .sort((a, b) => (b.own - b.full) - (a.own - a.full));
+  const body = $('#table tbody');
+  body.innerHTML = fallen.slice(0, 10).map(row =>
+    `<tr><td>${names[row.id]}</td><td class="num">${row.own.toFixed(2)}</td><td class="num">${row.full.toFixed(2)}</td><td class="num">${(row.own - row.full).toFixed(2)}</td></tr>`).join('');
+  $('#fallen').textContent = fallen.length
+    ? `${fallen.length} concepts predict lower recall than their own history implies, because a prerequisite has decayed. None of them were practised any less than before.`
+    : gamma === 0
+      ? 'Coupling is off, so every concept is independent. That is what every spaced repetition system assumes.'
+      : 'No concept is being dragged down: every prerequisite is still fresh.';
+  if (!selected || !halfLives[selected]) { $('#readout').textContent = 'Loading the concept graph.'; return; }
+  const p = fullRecall(selected, gamma);
+  $('#readout').innerHTML = selected
+    ? `<b>${names[selected]}</b>: predicted recall ${p.toFixed(2)} after ${(lastSeen[selected] || 0).toFixed(0)} days. Own half-life ${halfLives[selected].toFixed(1)} days, effective ${effective(selected, gamma).toFixed(1)} days.`
+    : 'Select a concept.';
+}
+
+function sync() { if (!selected) return; $('#days').value = Math.round(lastSeen[selected] || 0); $('#days-out').textContent = $('#days').value; draw(); }
+
+// index.html sits in web/, so the data lives one level up. Fall back to a
+// same-directory copy for anyone who serves the page on its own.
+const loadConcepts = async () => {
+  for (const path of ['../data/concepts/calc3.json', 'data/concepts/calc3.json']) {
+    try { const response = await fetch(path); if (response.ok) return await response.json(); } catch {}
+  }
+  throw new Error('calc3.json not found');
+};
+
+loadConcepts().then(payload => {
+  payload.concepts.forEach(c => { prereqs[c.id] = c.prereqs; names[c.id] = c.name; });
+  concepts = payload.concepts.map(c => c.id);
+  const seen = new Set();
+  const visit = id => { if (seen.has(id)) return; seen.add(id); (prereqs[id] || []).forEach(visit); order.push(id); };
+  concepts.forEach(visit);
+  // Illustrative half-lives: deeper material is newer and so less settled.
+  const depth = {};
+  for (const id of order) depth[id] = Math.max(0, ...(prereqs[id] || []).map(p => depth[p] + 1));
+  for (const id of order) { halfLives[id] = 9 - Math.min(depth[id], 6) * 0.9; lastSeen[id] = 3; }
+  selected = 'chain-rule';
+  $('#pick').innerHTML = order.map(id => `<option value="${id}">${names[id]}</option>`).join('');
+  $('#pick').value = selected;
+  sync();
+});
+
+$('#days').oninput = e => { $('#days-out').textContent = e.target.value; if (selected) lastSeen[selected] = Number(e.target.value); draw(); };
+$('#gamma').oninput = e => { $('#gamma-out').textContent = Number(e.target.value).toFixed(1); draw(); };
+$('#pick').onchange = e => { selected = e.target.value; sync(); };
+$('#chain').onclick = () => { selected = 'chain-rule'; $('#pick').value = selected; lastSeen['chain-rule'] = 21; sync(); };
+</script>
+</body>
+</html>
